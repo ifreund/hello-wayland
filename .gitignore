@@ -54,4 +54,5 @@ dkms.conf
 /hello-wayland
 /xdg-shell-client-protocol.h
 /xdg-shell-protocol.c
-/cat.h
+/viewporter-client-protocol.h
+/viewporter-protocol.c

@@ -8,12 +8,9 @@
 #include <wayland-client-protocol.h>
 #include <linux/input-event-codes.h>
 
-#include "cat.h"
 #include "shm.h"
 #include "xdg-shell-client-protocol.h"
-
-static const int width = 128;
-static const int height = 128;
+#include "viewporter-client-protocol.h"
 
 static bool running = true;
 
@@ -21,9 +18,10 @@ static struct wl_shm *shm = NULL;
 static struct wl_compositor *compositor = NULL;
 static struct xdg_wm_base *xdg_wm_base = NULL;
 
-static void *shm_data = NULL;
 static struct wl_surface *surface = NULL;
 static struct xdg_toplevel *xdg_toplevel = NULL;
+static struct wp_viewporter *viewporter = NULL;
+static struct wp_viewport *viewport = NULL;
 
 static void noop() {
 	// This space intentionally left blank
@@ -44,8 +42,18 @@ static void xdg_toplevel_handle_close(void *data,
 	running = false;
 }
 
+static void xdg_toplevel_handle_configure(void *data,
+		struct xdg_toplevel *xdg_toplevel, int32_t width, int32_t height,
+		struct wl_array *states) {
+	if (width == 0 || height == 0) {
+		wp_viewport_set_destination(viewport, 256, 256);
+	} else {
+		wp_viewport_set_destination(viewport, width, height);
+	}
+}
+
 static const struct xdg_toplevel_listener xdg_toplevel_listener = {
-	.configure = noop,
+	.configure = xdg_toplevel_handle_configure,
 	.close = xdg_toplevel_handle_close,
 };
 
@@ -91,6 +99,8 @@ static void handle_global(void *data, struct wl_registry *registry,
 			&wl_compositor_interface, 1);
 	} else if (strcmp(interface, xdg_wm_base_interface.name) == 0) {
 		xdg_wm_base = wl_registry_bind(registry, name, &xdg_wm_base_interface, 1);
+	} else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
+		viewporter = wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
 	}
 }
 
@@ -105,8 +115,7 @@ static const struct wl_registry_listener registry_listener = {
 };
 
 static struct wl_buffer *create_buffer() {
-	int stride = width * 4;
-	int size = stride * height;
+	int size = 12;
 
 	int fd = create_shm_file(size);
 	if (fd < 0) {
@@ -114,7 +123,7 @@ static struct wl_buffer *create_buffer() {
 		return NULL;
 	}
 
-	shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	uint32_t *shm_data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (shm_data == MAP_FAILED) {
 		fprintf(stderr, "mmap failed: %m\n");
 		close(fd);
@@ -122,12 +131,13 @@ static struct wl_buffer *create_buffer() {
 	}
 
 	struct wl_shm_pool *pool = wl_shm_create_pool(shm, fd, size);
-	struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, width, height,
-		stride, WL_SHM_FORMAT_ARGB8888);
-	wl_shm_pool_destroy(pool);
+	struct wl_buffer *buffer = wl_shm_pool_create_buffer(pool, 0, 3, 1,
+		12, WL_SHM_FORMAT_ARGB8888);
 
-	// MagickImage is from cat.h
-	memcpy(shm_data, MagickImage, size);
+	shm_data[0] = 0xffff0000;
+	shm_data[1] = 0xff00ff00;
+	shm_data[2] = 0xff0000ff;
+
 	return buffer;
 }
 
@@ -142,7 +152,8 @@ int main(int argc, char *argv[]) {
 	wl_registry_add_listener(registry, &registry_listener, NULL);
 	wl_display_roundtrip(display);
 
-	if (shm == NULL || compositor == NULL || xdg_wm_base == NULL) {
+	if (shm == NULL || compositor == NULL ||
+			xdg_wm_base == NULL || viewporter == NULL) {
 		fprintf(stderr, "no wl_shm, wl_compositor or xdg_wm_base support\n");
 		return EXIT_FAILURE;
 	}
@@ -153,17 +164,23 @@ int main(int argc, char *argv[]) {
 	}
 
 	surface = wl_compositor_create_surface(compositor);
+	viewport = wp_viewporter_get_viewport(viewporter, surface);
+
 	struct xdg_surface *xdg_surface =
 		xdg_wm_base_get_xdg_surface(xdg_wm_base, surface);
 	xdg_toplevel = xdg_surface_get_toplevel(xdg_surface);
 
 	xdg_surface_add_listener(xdg_surface, &xdg_surface_listener, NULL);
 	xdg_toplevel_add_listener(xdg_toplevel, &xdg_toplevel_listener, NULL);
-
+	
 	wl_surface_commit(surface);
 	wl_display_roundtrip(display);
 
 	wl_surface_attach(surface, buffer, 0, 0);
+
+	wp_viewport_set_source(viewport, wl_fixed_from_int(1), wl_fixed_from_int(0),
+		wl_fixed_from_int(1), wl_fixed_from_int(1));
+
 	wl_surface_commit(surface);
 
 	while (wl_display_dispatch(display) != -1 && running) {
